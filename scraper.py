@@ -211,26 +211,29 @@ def extract_target_count(html_content: str) -> int:
         ValueError: If extraction fails from both sources
     """
     # Strategy 1: Search for "Hasil Pencarian" pattern
-    pattern1 = r'Hasil\s+Pencarian[^\d]*([\d\.]+)\s*SPPG'
-    match1 = re.search(pattern1, html_content, re.IGNORECASE | re.DOTALL)
+    # Look for "Hasil Pencarian" followed by a number with optional thousand separators
+    pattern1 = r'Hasil\s+Pencarian\s*\n?\s*([\d\.]+)\s+SPPG'
+    match1 = re.search(pattern1, html_content, re.IGNORECASE)
     
     if match1:
         count_str = match1.group(1).replace('.', '').replace(',', '')
-        return int(count_str)
+        if len(count_str) >= 4:  # Sanity check: should be at least 4 digits
+            return int(count_str)
     
     # Strategy 2: Fallback to "Total Seluruh SPPG Operasional"
-    pattern2 = r'Total\s+Seluruh\s+SPPG\s+Operasional[^\d]*([\d\.]+)'
-    match2 = re.search(pattern2, html_content, re.IGNORECASE | re.DOTALL)
+    pattern2 = r'Total\s+Seluruh\s+SPPG\s+Operasional\s*\n?\s*([\d\.]+)'
+    match2 = re.search(pattern2, html_content, re.IGNORECASE)
     
     if match2:
         count_str = match2.group(1).replace('.', '').replace(',', '')
-        print("⚠ Used fallback: 'Total Seluruh SPPG Operasional'")
-        return int(count_str)
+        if len(count_str) >= 4:  # Sanity check
+            print("⚠ Used fallback: 'Total Seluruh SPPG Operasional'")
+            return int(count_str)
     
     # Both strategies failed - save debug output
     debug_path = Path("debug_html_snippet.txt")
     with open(debug_path, 'w', encoding='utf-8') as f:
-        f.write(html_content[:5000])
+        f.write(html_content[:10000])  # Save more HTML for debugging
     
     raise ValueError(
         f"Could not extract target count from website.\n"
