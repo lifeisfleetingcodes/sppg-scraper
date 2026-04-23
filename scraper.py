@@ -30,6 +30,15 @@ from bs4 import BeautifulSoup
 from fuzzywuzzy import fuzz
 from tqdm import tqdm
 
+# Selenium for JavaScript-rendered content
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
 
 # ============================================================
 # CONFIGURATION
@@ -195,11 +204,100 @@ class CheckpointManager:
 # TARGET EXTRACTION
 # ============================================================
 
+def extract_target_count_with_selenium(url: str) -> int:
+    """
+    Extract total SPPG count using Selenium (handles JavaScript rendering).
+    
+    Args:
+        url: URL to scrape
+    
+    Returns:
+        int: Target count from website
+    
+    Raises:
+        ValueError: If extraction fails
+    """
+    options = Options()
+    options.add_argument('--headless')  # Run in background
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument(f'user-agent={random.choice(USER_AGENTS)}')
+    
+    driver = None
+    try:
+        # Initialize Chrome driver
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(30)
+        
+        # Load page
+        driver.get(url)
+        
+        # Wait for "Hasil Pencarian" or "Total Seluruh" to appear
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Hasil Pencarian') or contains(text(), 'Total Seluruh')]"))
+            )
+        except TimeoutException:
+            pass  # Continue anyway, element might be there
+        
+        # Give JavaScript time to render
+        time.sleep(2)
+        
+        # Get page source after JavaScript execution
+        html_content = driver.page_source
+        
+        # Try to extract from rendered HTML
+        # Strategy 1: Look for "Hasil Pencarian" followed by number
+        pattern1 = r'Hasil\s+Pencarian\s*</.*?>\s*([\d\.]+)\s+SPPG'
+        match1 = re.search(pattern1, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if match1:
+            count_str = match1.group(1).replace('.', '').replace(',', '')
+            if len(count_str) >= 4:
+                return int(count_str)
+        
+        # Strategy 2: Look for "Total Seluruh SPPG Operasional"
+        pattern2 = r'Total\s+Seluruh\s+SPPG\s+Operasional\s*</.*?>\s*([\d\.]+)'
+        match2 = re.search(pattern2, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if match2:
+            count_str = match2.group(1).replace('.', '').replace(',', '')
+            if len(count_str) >= 4:
+                print("⚠ Used fallback: 'Total Seluruh SPPG Operasional'")
+                return int(count_str)
+        
+        # Strategy 3: Try simpler pattern - just find large numbers
+        pattern3 = r'(2[0-9]\.?[0-9]{3})\s+SPPG'
+        match3 = re.search(pattern3, html_content)
+        
+        if match3:
+            count_str = match3.group(1).replace('.', '').replace(',', '')
+            print(f"⚠ Used pattern matching: found {count_str}")
+            return int(count_str)
+        
+        # Save debug info
+        debug_path = Path("debug_html_rendered.txt")
+        with open(debug_path, 'w', encoding='utf-8') as f:
+            f.write(html_content[:15000])
+        
+        raise ValueError(
+            f"Could not extract target count from JavaScript-rendered page.\n"
+            f"Tried multiple patterns on rendered HTML.\n"
+            f"HTML snippet saved to {debug_path}"
+        )
+    
+    finally:
+        if driver:
+            driver.quit()
+
+
 def extract_target_count(html_content: str) -> int:
     """
     Extract total SPPG count from 'Hasil Pencarian' field.
     
-    Handles multiple formats and provides fallback.
+    NOTE: This function is kept for backward compatibility but may not work
+    with JavaScript-rendered pages. Use extract_target_count_with_selenium instead.
     
     Args:
         html_content: Raw HTML from first page
@@ -238,7 +336,8 @@ def extract_target_count(html_content: str) -> int:
     raise ValueError(
         f"Could not extract target count from website.\n"
         f"Searched for: 'Hasil Pencarian' and 'Total Seluruh SPPG Operasional'\n"
-        f"HTML snippet saved to {debug_path}"
+        f"HTML snippet saved to {debug_path}\n"
+        f"This page likely requires JavaScript rendering. Using Selenium instead."
     )
 
 
@@ -968,25 +1067,38 @@ def main():
     checkpoint = CheckpointManager()
     scraper = SPPGScraper(CONFIG)
     
-    # Step 1: Extract target count
-    print("Extracting target count from website...")
+    # Step 1: Extract target count using Selenium
+    print("Extracting target count from website (using browser)...")
     
     try:
-        html, error = scraper.fetch_page(1)
-        if html is None:
-            print(f"✗ Failed to fetch first page: {error}")
-            sys.exit(1)
-        
-        target_count = extract_target_count(html)
+        url = f"{CONFIG['base_url']}?page=1&search="
+        target_count = extract_target_count_with_selenium(url)
         expected_pages = calculate_expected_pages(target_count, CONFIG['records_per_page'])
         
         print(f"✓ Target: {target_count:,} SPPG")
         print(f"✓ Expected pages: {expected_pages:,}")
         print()
         
-    except ValueError as e:
-        print(f"✗ {e}")
-        sys.exit(1)
+    except Exception as e:
+        print(f"✗ Failed to extract target count: {e}")
+        print("\nTrying fallback with regular HTTP request...")
+        
+        # Fallback: try regular requests (might not work with JS-rendered pages)
+        try:
+            html, error = scraper.fetch_page(1)
+            if html is None:
+                print(f"✗ Failed to fetch first page: {error}")
+                sys.exit(1)
+            
+            target_count = extract_target_count(html)
+            expected_pages = calculate_expected_pages(target_count, CONFIG['records_per_page'])
+            
+            print(f"✓ Target: {target_count:,} SPPG")
+            print(f"✓ Expected pages: {expected_pages:,}")
+            print()
+        except ValueError as e:
+            print(f"✗ {e}")
+            sys.exit(1)
     
     # Check for previous run target
     previous_run = dir_manager.get_latest_run()

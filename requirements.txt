@@ -4,6 +4,7 @@
 # Core scraping
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+selenium>=4.15.0  # For JavaScript-rendered pages
 
 # Data processing
 pandas>=2.0.0
