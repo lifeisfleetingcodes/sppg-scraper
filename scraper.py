@@ -358,10 +358,50 @@ class SPPGScraper:
         self.session = requests.Session()
         self.failed_pages = []
         self.partial_pages = []
+        
+        # Adaptive rate limiting
+        self.current_delay = 0.5  # Start optimistic (faster than default)
+        self.min_delay = 0.3      # Minimum delay (fastest allowed)
+        self.max_delay = 10.0     # Maximum delay (when heavily rate limited)
+        self.success_count = 0    # Track consecutive successes
+        self.backoff_multiplier = 2.0  # How much to slow down on errors
     
     def _get_random_user_agent(self) -> str:
         """Get random user agent for rotation."""
         return random.choice(USER_AGENTS)
+    
+    def adjust_delay(self, success: bool, error_type: str = ""):
+        """
+        Adjust delay based on request success/failure.
+        
+        Speeds up on success, slows down on rate limiting.
+        """
+        if success:
+            self.success_count += 1
+            # Speed up after 5 consecutive successes
+            if self.success_count >= 5:
+                old_delay = self.current_delay
+                self.current_delay = max(
+                    self.min_delay,
+                    self.current_delay * 0.8  # Reduce by 20%
+                )
+                if old_delay != self.current_delay:
+                    print(f"✓ Speeding up: {old_delay:.2f}s → {self.current_delay:.2f}s per page")
+                self.success_count = 0
+        else:
+            # Slow down on rate limiting or errors
+            if error_type in ["HTTP_ERROR", "TIMEOUT"]:
+                old_delay = self.current_delay
+                self.current_delay = min(
+                    self.max_delay,
+                    self.current_delay * self.backoff_multiplier
+                )
+                self.success_count = 0
+                print(f"⚠ Rate limited. Slowing down: {old_delay:.2f}s → {self.current_delay:.2f}s per page")
+    
+    def get_current_delay(self) -> float:
+        """Get current adaptive delay."""
+        return self.current_delay
     
     def _check_captcha(self, response: requests.Response) -> bool:
         """Detect CAPTCHA or rate limiting."""
@@ -461,9 +501,9 @@ class SPPGScraper:
     
     def scrape_all_pages(self, target_count: int, expected_pages: int, 
                          logger: ScraperLogger, checkpoint: CheckpointManager,
-                         run_id: str) -> pd.DataFrame:
+                         run_id: str, run_dir: Path) -> pd.DataFrame:
         """
-        Main scraping loop with progress tracking.
+        Main scraping loop with progress tracking and adaptive rate limiting.
         
         Args:
             target_count: Expected total records from website
@@ -471,6 +511,7 @@ class SPPGScraper:
             logger: Logger instance
             checkpoint: Checkpoint manager
             run_id: Current run identifier
+            run_dir: Directory for this run's outputs
         
         Returns:
             DataFrame of all scraped records
@@ -512,6 +553,7 @@ class SPPGScraper:
                     logger.log_page(page_num, "FAILED", 0, duration, error_type, 
                                    f"Failed after {self.config['max_retries']} retries")
                     self.failed_pages.append(page_num)
+                    self.adjust_delay(success=False, error_type=error_type)
                     pbar.update(1)
                     continue
                 
@@ -527,6 +569,9 @@ class SPPGScraper:
                     
                     all_records.extend(records)
                     
+                    # Adjust delay based on success
+                    self.adjust_delay(success=True)
+                    
                     # Update checkpoint
                     checkpoint.save({
                         'last_completed_page': page_num,
@@ -534,21 +579,36 @@ class SPPGScraper:
                         'total_records_scraped': len(all_records),
                         'run_id': run_id,
                         'target_count': target_count,
-                        'expected_pages': expected_pages
+                        'expected_pages': expected_pages,
+                        'current_delay': self.current_delay
                     })
+                    
+                    # Save partial data EVERY PAGE
+                    if len(all_records) > 0:
+                        partial_df = pd.DataFrame(all_records)
+                        partial_path = run_dir / "sppg_partial.csv"
+                        partial_df.to_csv(partial_path, sep=';', index=False, encoding='utf-8')
                 
                 except Exception as e:
                     logger.log_page(page_num, "FAILED", 0, duration, "PARSE_ERROR", str(e))
                     self.failed_pages.append(page_num)
+                    self.adjust_delay(success=False, error_type="PARSE_ERROR")
                 
-                # Rate limiting
+                # Rate limiting with adaptive delay
                 if page_num % self.config['cooling_interval'] == 0:
                     time.sleep(self.config['cooling_duration'])
                 else:
-                    time.sleep(random.uniform(self.config['delay_min'], 
-                                            self.config['delay_max']))
+                    # Use adaptive delay instead of random delay
+                    time.sleep(self.get_current_delay())
                 
                 pbar.update(1)
+        
+        # Final save of partial data
+        if len(all_records) > 0:
+            partial_df = pd.DataFrame(all_records)
+            partial_path = run_dir / "sppg_partial.csv"
+            partial_df.to_csv(partial_path, sep=';', index=False, encoding='utf-8')
+            print(f"\n✓ Partial data saved: {len(all_records)} records in {partial_path.name}")
         
         # Retry failed pages
         if self.failed_pages:
@@ -569,7 +629,7 @@ class SPPGScraper:
                     except Exception as e:
                         logger.log_page(page_num, "FAILED", 0, duration, "PARSE_ERROR", str(e))
                 
-                time.sleep(random.uniform(self.config['delay_min'], self.config['delay_max']))
+                time.sleep(self.get_current_delay())
             
             # Update failed list
             self.failed_pages = [p for p in self.failed_pages if p not in retry_success]
@@ -1139,7 +1199,7 @@ def main():
     
     # Step 2: Scrape all pages
     print("Starting scrape...")
-    df_raw = scraper.scrape_all_pages(target_count, expected_pages, logger, checkpoint, run_id)
+    df_raw = scraper.scrape_all_pages(target_count, expected_pages, logger, checkpoint, run_id, run_dir)
     
     print(f"\n✓ Scraped {len(df_raw):,} records")
     
