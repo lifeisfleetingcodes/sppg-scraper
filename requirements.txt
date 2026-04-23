@@ -1,0 +1,19 @@
+# SPPG Scraper Dependencies
+# Python 3.8+ required
+
+# Core scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Data processing
+pandas>=2.0.0
+
+# Fuzzy string matching
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0  # Speedup for fuzzywuzzy
+
+# Progress bars
+tqdm>=4.65.0
+
+# HTML parsing (bs4 dependency, explicit for clarity)
+lxml>=4.9.0
